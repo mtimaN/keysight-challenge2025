@@ -9,6 +9,8 @@
 #include <tbb/blocked_range.h>
 #include <tbb/global_control.h>
 #include <tbb/flow_graph.h>
+#include <tbb/parallel_reduce.h>
+
 #include "dpc_common.hpp"
 #include "protocols.h"
 #include <arpa/inet.h>
@@ -63,7 +65,7 @@ int main(int argc, char* argv[]) {
     if (argc == 1) {
         handle = pcap_open_offline("/root/keysight-challenge2025/src/capture2.pcap", errbuf);
     } else {
-        // handle = pcap_open_live(argv[1], , , ,errbuf);
+        handle = pcap_open_live(argv[1], BUFSIZ, 1, 1000, errbuf);
     }
     tbb::global_control gc(mp, nth);
     tbb::flow::graph g;
@@ -72,20 +74,23 @@ int main(int argc, char* argv[]) {
     tbb::flow::input_node<PacketBatch> in_node{g,
         [&](tbb::flow_control& fc) -> PacketBatch {
             PacketBatch batch;
-
+            struct pcap_pkthdr* header;
+            const u_char* pkt;
+            int ret = pcap_next_ex(handle, &header, &pkt);
+            if (ret == -2 || ret == -1) {
+                fc.stop();
+            }
+        
             for (size_t i = 0; i < BURST_SIZE; ++i) {
-                struct pcap_pkthdr* header;
-                const u_char* pkt;
-                int ret = pcap_next_ex(handle, &header, &pkt);
                 if (ret == 1 && header && pkt) {
                     Packet p{};
                     size_t len = PACKET_SIZE;
                     std::memcpy(p.data(), pkt, len);
                     batch.push_back(p);
                 } else if (ret == -2 || ret == -1) {
-                    fc.stop();
                     break;
                 }
+                ret = pcap_next_ex(handle, &header, &pkt);
             }
 
             return batch;
@@ -93,10 +98,10 @@ int main(int argc, char* argv[]) {
     };
 
     // Packet inspection node
-    tbb::flow::function_node<PacketBatch, PacketBatch> inspect_packet_node {
+    tbb::flow::function_node<PacketBatch, InspectResult> inspect_packet_node {
         g, tbb::flow::unlimited, [&](PacketBatch batch) -> InspectResult {
             PacketBatch result(batch.size());
-            std::array<std::array<u_int8_t, BURST_SIZE>, 6> counters{std::array<u_int8_t, BURST_SIZE>{}};
+            std::array<std::array<u_int8_t, BURST_SIZE>, 6> counters{};
 
             // By including all the SYCL work in a {} block, we ensure
             // all SYCL tasks must complete before exiting the block
@@ -105,7 +110,7 @@ int main(int argc, char* argv[]) {
                 sycl::buffer<u_int8_t, 2> counters_buf(reinterpret_cast<u_int8_t*>(counters.data()),
                                                        sycl::range<2>(6, BURST_SIZE));
 
-                                                       sycl::queue gpuQ(sycl::default_selector_v, dpc_common::exception_handler);
+                sycl::queue gpuQ(sycl::default_selector_v, dpc_common::exception_handler);
                 
                 sycl::range<1> n_items{batch.size()}; 
                 sycl::buffer batch_buffer(batch);
@@ -134,7 +139,6 @@ int main(int argc, char* argv[]) {
                     };
                     h.parallel_for(n_items, compute);
                 }).wait_and_throw();  // end of the commands for the SYCL queue
-                std::cout << "SYCL block done\n";
                 for (int i = 0; i < 6; ++i) {
                     std::cout << "Counter " << i << ": ";
                     for (int j = 0; j < BURST_SIZE; ++j) {
@@ -143,13 +147,12 @@ int main(int argc, char* argv[]) {
                     std::cout << std::endl;
                 }
             }  // End of the scope for SYCL code; the queue has completed the work
-            // Return the number of packets processed
             
             return {result, counters};
         }
     };
 
-    tbb::flow::function_node<PacketBatch, PacketBatch> routing_node{
+    tbb::flow::function_node<InspectResult, PacketBatch> routing_node{
         g, tbb::flow::unlimited,
         [&](const InspectResult& inspect_result) -> PacketBatch {
             auto batch = inspect_result.first;
@@ -161,16 +164,15 @@ int main(int argc, char* argv[]) {
                 gpuQ.submit([&](sycl::handler& h) {
                     sycl::accessor batch_accessor(batch_buffer, h, sycl::read_write);
                     auto compute = [=](sycl::id<1> index) {
-                        auto packet = batch_accessor[index];
+                        auto& packet = batch_accessor[index];
                         ether_header* eth = (ether_header*)packet.data();
-                        if (eth->ether_type == ETHERTYPE_IP) {
+                        if (ntohs(eth->ether_type) != ETHERTYPE_IP) {
                             return;
                         }
                         iphdr* ip = (iphdr*)(packet.data() + sizeof(ether_header));
 
                         ip->daddr += 1 + (1 << 8) + (1 << 16) + (1 << 24); // Increment destination IP
                     };
-
                    
                     h.parallel_for(n_items, compute);
                 }).wait_and_throw();
@@ -189,13 +191,26 @@ int main(int argc, char* argv[]) {
         }
     };
 
-    // construct graph
     // Sum counters node
-    tbb::flow::function_node<int, std::array<int, 6>> sum_counters_node {
+    std::array<int, 6> total_counters = {0, 0, 0, 0, 0, 0};
+    tbb::flow::function_node<InspectResult> sum_counters_node {
         g, tbb::flow::unlimited, [&](const InspectResult &result) {
-            std::array<int, 6> total_counters = {0, 0, 0, 0, 0, 0};
-            
+            auto counters = result.second;
+
             // TODO: Parallel reduce
+            for (int i = 0; i < 6; ++i) {
+                total_counters[i] += tbb::parallel_reduce(
+                    tbb::blocked_range<size_t>(0, BURST_SIZE),
+                    0,
+                    [&](const tbb::blocked_range<size_t>& r, int sum) {
+                        for (size_t j = r.begin(); j != r.end(); ++j) {
+                            sum += counters[i][j];
+                        }
+                        return sum;
+                    },
+                    std::plus<int>());
+            }
+
             for (const auto &c : total_counters) {
                 std::cout << c << ' ';
             }
@@ -203,14 +218,19 @@ int main(int argc, char* argv[]) {
         }
     };
     
-    // construct graph
-    tbb::flow::make_edge<PacketBatch>(in_node, inspect_packet_node);
-    tbb::flow::make_edge<PacketBatch>(inspect_packet_node, routing_node);
-    tbb::flow::make_edge<PacketBatch>(inspect_packet_node, sum_counters_node);
-    tbb::flow::make_edge<PacketBatch>(routing_node, send_node);
+    // construct graph - fix the edge connections with correct types
+    tbb::flow::make_edge(in_node, inspect_packet_node);
+    tbb::flow::make_edge(inspect_packet_node, routing_node);
+    tbb::flow::make_edge(inspect_packet_node, sum_counters_node);
+    tbb::flow::make_edge(routing_node, send_node);
 
     in_node.activate();
     g.wait_for_all();
 
     std::cout << "Done waiting" << std::endl;
+    
+    // Clean up
+    pcap_close(handle);
+    
+    return 0;
 }
