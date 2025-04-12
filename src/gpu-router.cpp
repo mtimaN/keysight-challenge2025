@@ -203,22 +203,6 @@ int main(int argc, char* argv[]) {
                     },
                     std::plus<int>());
             }
-
-            for (int i = 0; i < 6; ++i) {
-                if (i == 0) {
-                    std::cout << "IPv4 count: " << total_counters[i] << "\n";
-                } else if (i == 1) {
-                    std::cout << "IPv6 count: " << total_counters[i] << "\n";
-                } else if (i == 2) {
-                    std::cout << "ARP count: " << total_counters[i] << "\n";
-                } else if (i == 3) {
-                    std::cout << "ICMP count: " << total_counters[i] << "\n";
-                } else if (i == 4) {
-                    std::cout << "TCP count: " << total_counters[i] << "\n";
-                } else if (i == 5) {
-                    std::cout << "UDP count: " << total_counters[i] << "\n";
-                }
-            }
         }
     };
     
@@ -235,6 +219,21 @@ int main(int argc, char* argv[]) {
     
     // Clean up
     pcap_close(handle);
+    for (int i = 0; i < 6; ++i) {
+        if (i == 0) {
+            std::cout << "IPv4 count: " << total_counters[i] << "\n";
+        } else if (i == 1) {
+            std::cout << "IPv6 count: " << total_counters[i] << "\n";
+        } else if (i == 2) {
+            std::cout << "ARP count: " << total_counters[i] << "\n";
+        } else if (i == 3) {
+            std::cout << "ICMP count: " << total_counters[i] << "\n";
+        } else if (i == 4) {
+            std::cout << "TCP count: " << total_counters[i] << "\n";
+        } else if (i == 5) {
+            std::cout << "UDP count: " << total_counters[i] << "\n";
+        }
+    }
     
     return 0;
 }
