@@ -1,3 +1,5 @@
+#pragma once
+
 #include <unistd.h>
 #include <stdint.h>
 
@@ -11,10 +13,6 @@
 #define ETHERTYPE_IP 0x0800
 #define ETHERTYPE_ARP 0x0806
 #define ETHERTYPE_IPV6 0x086DD
-
-#define IPPROTO_ICMP 1
-#define IPPROTO_TCP 6
-#define IPPROTO_UDP 17
 
 #define MAX_TTL 64
 

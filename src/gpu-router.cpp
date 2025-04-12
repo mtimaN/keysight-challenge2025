@@ -5,13 +5,18 @@
 
 #include <sycl/sycl.hpp>
 
+#include <pcap.h>
 #include <tbb/blocked_range.h>
 #include <tbb/global_control.h>
 #include <tbb/flow_graph.h>
 #include "dpc_common.hpp"
+#include "protocols.h"
 
-const size_t burst_size = 32;
-#define PACKET_SIZE 64
+constexpr size_t BURST_SIZE = 32;
+constexpr size_t PACKET_SIZE = 1518;
+
+using Packet = std::array<uint8_t, PACKET_SIZE>;
+using PacketBatch = std::vector<Packet>;
 
 int main() {
     sycl::queue q;
@@ -19,61 +24,67 @@ int main() {
     std::cout << "Using device: " <<
         q.get_device().get_info<sycl::info::device::name>() << std::endl;
 
+    char errbuf[PCAP_ERRBUF_SIZE];
     int nth = 10;  // number of threads
     auto mp = tbb::global_control::max_allowed_parallelism;
+    pcap_t* handle = pcap_open_offline("/root/keysight-challenge2025/src/capture2.pcap", errbuf);
     tbb::global_control gc(mp, nth);
     tbb::flow::graph g;
 
     // Input node: get packets from the socket or from the packet capture
-    tbb::flow::input_node<int> in_node{g,
-        [&](tbb::flow_control& fc) -> int {
-            int nr_packets = 0;
-	    char* packet;
+    tbb::flow::input_node<PacketBatch> in_node{g,
+        [&](tbb::flow_control& fc) -> PacketBatch {
+            PacketBatch batch;
 
-            std::cout << "Input node running " << std::endl;
-
-            // Attempt to read the packets from the packet capture or read
-	    // them from a network socket
-            packet = NULL;
-            if (packet == NULL) {
-		    std::cout << "No more packets" << std::endl;
-                fc.stop();
-                return 0;
+            for (size_t i = 0; i < BURST_SIZE; ++i) {
+                struct pcap_pkthdr* header;
+                const u_char* pkt;
+                int ret = pcap_next_ex(handle, &header, &pkt);
+                if (ret == 1 && header && pkt) {
+                    Packet p{};
+                    size_t len = header->len < PACKET_SIZE ? header->len : PACKET_SIZE;
+                    std::memcpy(p.data(), pkt, len);
+                    batch.push_back(p);
+                } else if (ret == -2 || ret == -1) {
+                    fc.stop();
+                    break;
+                }
             }
 
-            // Return the number of packets read
-            return nr_packets;
+            return batch;
         }
     };
 
-    // Packet inspection node
-    tbb::flow::function_node<int, int> inspect_packet_node {
-        g, tbb::flow::unlimited, [&](int nr_packets) {
-            // By including all the SYCL work in a {} block, we ensure
-            // all SYCL tasks must complete before exiting the block
+    tbb::flow::function_node<PacketBatch, PacketBatch> routing_node{
+        g, tbb::flow::unlimited,
+        [&](const PacketBatch& batch) -> PacketBatch {
             {
-                sycl::queue gpuQ(sycl::gpu_selector_v, dpc_common::exception_handler);
+                sycl::queue gpuQ(sycl::default_selector_v, dpc_common::exception_handler);
+                std::cout << "Selected Device Name: " <<
+                gpuQ.get_device().get_info<sycl::info::device::name>() << "\n";
 
-                std::cout << "Selected GPU Device Name: " <<
-                    gpuQ.get_device().get_info<sycl::info::device::name>() << "\n";
-
+                sycl::range<1> n_items{batch.size()}; 
+                sycl::buffer batch_buffer(batch);
                 gpuQ.submit([&](sycl::handler& h) {
-                            auto compute = [=](auto i) {
-                            // Process the packets
-                            };
+                    sycl::accessor batch_accessor(batch_buffer, h, sycl::read_write);
+                    auto compute = [=](sycl::id<1> index) {
+                        auto packet = batch_accessor[index];
+                        ether_header* eth = (ether_header*)packet.data();
+                        iphdr* ip = (iphdr*)(packet.data() + sizeof(ether_header));
 
-                            h.parallel_for(nr_packets, compute);
-                        }
-                    ).wait_and_throw();  // end of the commands for the SYCL queue
+                        ip->daddr += 1 + (1 << 8) + (1 << 16) + (1 << 24); // Increment destination IP
+                    };
 
-            }  // End of the scope for SYCL code; the queue has completed the work
- 
-            // Return the number of packets processed
-            return nr_packets;
-        }};
+                   
+                    h.parallel_for(n_items, compute);
+                }).wait_and_throw();
+            }
+            return batch;
+        }
+    };
 
     // construct graph
-    tbb::flow::make_edge<int>(in_node, inspect_packet_node);
+    tbb::flow::make_edge<PacketBatch>(in_node, routing_node);
 
     in_node.activate();
     g.wait_for_all();
