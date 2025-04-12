@@ -19,3 +19,21 @@ The main description of the task is in this [document](https://docs.google.com/d
 
     * Clean the program
       make clean
+
+## Implementation
+
+We have implemented all the main features presented in the document.
+
+Packets are read using libpcap, parsed using a scheduler queue on the GPU, sent to both the IPv4 Router and the Statistics counter(IPv6 packets are discarded by the Router.)
+
+Bonus implementations:
+- use of std::array
+- use of SYCL buffers and accessors
+- use of parallel_reduce()
+- time profiling
+
+## Possible improvements
+
+One possible improvement would have been leveraging asynchronous programming while solving the task. The gpu tasks are handled asynchronously, but the CPU waits for the event before proceeding.
+
+The Sending node is untested as we could not test on Keysight's hardware.
