@@ -94,7 +94,9 @@ int main(int argc, char* argv[]) {
     std::array<std::array<u_int8_t, burst_size>, 6> counters;
     // Packet inspection node
     tbb::flow::function_node<PacketBatch> inspect_packet_node {
-        g, tbb::flow::unlimited, [&](PacketBatch batch) {
+        g, tbb::flow::unlimited, [&](PacketBatch batch) -> PacketBatch {
+            PacketBatch result;
+
             // By including all the SYCL work in a {} block, we ensure
             // all SYCL tasks must complete before exiting the block
             {
@@ -109,29 +111,33 @@ int main(int argc, char* argv[]) {
                 
                 sycl::range<1> n_items{batch.size()}; 
                 sycl::buffer batch_buffer(batch);
-                gpuQ.submit([&](sycl::handler& h) {
-                            auto counters_acc = counters_buf.get_access<sycl::access::mode::read_write>(h);
-                            
-                            auto compute = [=](auto i) {
-                                // Process the packets
-                                char* packet = vec[i];
-                                uint8_t packet_type = parse_packet(packet);
-                                if (packet_type != -1) {
-                                    if (packet_type == ICMP_IDX || 
-                                        packet_type == TCP_IDX ||
-                                        packet_type == UDP_IDX) {
-                                        counters_acc[IPv4_IDX][i]++;
-                                    }
-                                    counters_acc[packet_type][i]++;
-                                }
-                            };
+                sycl::buffer result_buffer(result);
 
-                            h.parallel_for(nr_packets, compute);
-                        };
-                    ).wait_and_throw();  // end of the commands for the SYCL queue
+                gpuQ.submit([&](sycl::handler& h) {
+                    auto counters_acc = counters_buf.get_access<sycl::access::mode::read_write>(h);
+                    auto batch_acc = batch_buffer.get_access<sycl::access::mode::read>(h);
+                    auto result_acc = result_buffer.get_access<sycl::access::mode::write>(h);
+                    
+                    auto compute = [=](auto i) {
+                        // Process the packets
+                        char* packet = batch_acc[i];
+                        uint8_t packet_type = parse_packet(packet);
+                        if (packet_type != -1) {
+                            if (packet_type == ICMP_IDX || 
+                                packet_type == TCP_IDX ||
+                                packet_type == UDP_IDX) {
+                                counters_acc[IPv4_IDX][i]++;
+                                result_acc[i] = packet;
+                            }
+                            counters_acc[packet_type][i]++;
+                        }
+                    };
+
+                    h.parallel_for(nr_packets, compute);
+                }).wait_and_throw();  // end of the commands for the SYCL queue
             }  // End of the scope for SYCL code; the queue has completed the work
             // Return the number of packets processed
-            return nr_packets;
+            return result;
         }
     };
 
