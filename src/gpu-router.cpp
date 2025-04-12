@@ -55,6 +55,7 @@ int parse_packet(const char* packet, int idx) {
 }
 
 int main(int argc, char* argv[]) {
+int main(int argc, char* argv[]) {
     sycl::queue q;
 
     std::cout << "Using device: " <<
