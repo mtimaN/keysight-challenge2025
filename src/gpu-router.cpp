@@ -139,13 +139,6 @@ int main(int argc, char* argv[]) {
                     };
                     h.parallel_for(n_items, compute);
                 }).wait_and_throw();  // end of the commands for the SYCL queue
-                for (int i = 0; i < 6; ++i) {
-                    std::cout << "Counter " << i << ": ";
-                    for (int j = 0; j < BURST_SIZE; ++j) {
-                        std::cout << static_cast<int>(counters[i][j]) << " ";
-                    }
-                    std::cout << std::endl;
-                }
             }  // End of the scope for SYCL code; the queue has completed the work
             
             return {result, counters};
@@ -211,10 +204,21 @@ int main(int argc, char* argv[]) {
                     std::plus<int>());
             }
 
-            for (const auto &c : total_counters) {
-                std::cout << c << ' ';
+            for (int i = 0; i < 6; ++i) {
+                if (i == 0) {
+                    std::cout << "IPv4 count: " << total_counters[i] << "\n";
+                } else if (i == 1) {
+                    std::cout << "IPv6 count: " << total_counters[i] << "\n";
+                } else if (i == 2) {
+                    std::cout << "ARP count: " << total_counters[i] << "\n";
+                } else if (i == 3) {
+                    std::cout << "ICMP count: " << total_counters[i] << "\n";
+                } else if (i == 4) {
+                    std::cout << "TCP count: " << total_counters[i] << "\n";
+                } else if (i == 5) {
+                    std::cout << "UDP count: " << total_counters[i] << "\n";
+                }
             }
-            std::cout << '\n';
         }
     };
     
