@@ -13,7 +13,7 @@
 #include "protocols.h"
 
 constexpr size_t BURST_SIZE = 32;
-constexpr size_t PACKET_SIZE = 1518;
+constexpr size_t PACKET_SIZE = 1519;
 
 using Packet = std::array<uint8_t, PACKET_SIZE>;
 using PacketBatch = std::vector<Packet>;
@@ -42,7 +42,7 @@ int main() {
                 int ret = pcap_next_ex(handle, &header, &pkt);
                 if (ret == 1 && header && pkt) {
                     Packet p{};
-                    size_t len = header->len < PACKET_SIZE ? header->len : PACKET_SIZE;
+                    size_t len = PACKET_SIZE;
                     std::memcpy(p.data(), pkt, len);
                     batch.push_back(p);
                 } else if (ret == -2 || ret == -1) {
@@ -83,8 +83,19 @@ int main() {
         }
     };
 
+    tbb::flow::function_node<PacketBatch, PacketBatch> send_node{
+        g, tbb::flow::unlimited,
+        [&](const PacketBatch& batch) -> PacketBatch {
+            for (const auto& packet : batch) {
+                pcap_sendpacket(handle, packet.data(), packet.size());
+            }
+            return batch;
+        }
+    };
+
     // construct graph
     tbb::flow::make_edge<PacketBatch>(in_node, routing_node);
+    tbb::flow::make_edge<PacketBatch>(routing_node, send_node);
 
     in_node.activate();
     g.wait_for_all();
