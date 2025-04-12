@@ -67,6 +67,7 @@ int main(int argc, char* argv[]) {
     } else {
         handle = pcap_open_live(argv[1], BUFSIZ, 1, 1000, errbuf);
     }
+    pcap_t *send_handle = pcap_open_live("eth0", BUFSIZ, 1, 1000, errbuf);
     tbb::global_control gc(mp, nth);
     tbb::flow::graph g;
 
@@ -202,7 +203,7 @@ int main(int argc, char* argv[]) {
         g, tbb::flow::unlimited,
         [&](const PacketBatch& batch) -> PacketBatch {
             for (const auto& packet : batch) {
-                pcap_sendpacket(handle, packet.data(), packet.size());
+                pcap_sendpacket(send_handle, packet.data(), packet.size());
             }
             return batch;
         }

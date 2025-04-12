@@ -32,6 +32,8 @@ Bonus implementations:
 - use of parallel_reduce()
 - time profiling
 
+In order for the sending to work, the correct interface has to be added at line 70.
+
 ## Possible improvements
 
 One possible improvement would have been leveraging asynchronous programming while solving the task. The gpu tasks are handled asynchronously, but the CPU waits for the event before proceeding.
