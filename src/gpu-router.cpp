@@ -63,7 +63,7 @@ int main(int argc, char* argv[]) {
     pcap_t *handle{};
 
     if (argc == 1) {
-        handle = pcap_open_offline("/root/keysight-challenge2025/src/capture2.pcap", errbuf);
+        handle = pcap_open_offline("/root/keysight-challenge2025/src/capture3.pcap", errbuf);
     } else {
         handle = pcap_open_live(argv[1], BUFSIZ, 1, 1000, errbuf);
     }
@@ -97,6 +97,9 @@ int main(int argc, char* argv[]) {
         }
     };
 
+
+    double avg_inspect_time = 0.0;
+    int inspect_count = 0;
     // Packet inspection node
     tbb::flow::function_node<PacketBatch, InspectResult> inspect_packet_node {
         g, tbb::flow::unlimited, [&](PacketBatch batch) -> InspectResult {
@@ -110,13 +113,14 @@ int main(int argc, char* argv[]) {
                 sycl::buffer<u_int8_t, 2> counters_buf(reinterpret_cast<u_int8_t*>(counters.data()),
                                                        sycl::range<2>(6, BURST_SIZE));
 
-                sycl::queue gpuQ(sycl::default_selector_v, dpc_common::exception_handler);
+                sycl::queue gpuQ(sycl::default_selector_v,
+                    sycl::property::queue::enable_profiling());
                 
                 sycl::range<1> n_items{batch.size()}; 
                 sycl::buffer batch_buffer(batch);
                 sycl::buffer result_buffer(result);
 
-                gpuQ.submit([&](sycl::handler& h) {
+                sycl::event event = gpuQ.submit([&](sycl::handler& h) {
                     sycl::accessor counters_acc(counters_buf, h, sycl::read_write);
                     sycl::accessor batch_acc(batch_buffer, h, sycl::read_only);
                     sycl::accessor result_acc(result_buffer, h, sycl::write_only);
@@ -138,23 +142,35 @@ int main(int argc, char* argv[]) {
                         }
                     };
                     h.parallel_for(n_items, compute);
-                }).wait_and_throw();  // end of the commands for the SYCL queue
+                });
+                event.wait();
+                double kernel_time = (event.template get_profiling_info<
+                    sycl::info::event_profiling::command_end>() -
+                event.template get_profiling_info<
+                    sycl::info::event_profiling::command_start>()) / 1e6;
+                avg_inspect_time += kernel_time;
+                inspect_count++;
+
             }  // End of the scope for SYCL code; the queue has completed the work
             
             return {result, counters};
         }
     };
 
+
+    double avg_routing_time = 0.0;
+    int routing_count = 0;
     tbb::flow::function_node<InspectResult, PacketBatch> routing_node{
         g, tbb::flow::unlimited,
         [&](const InspectResult& inspect_result) -> PacketBatch {
             auto batch = inspect_result.first;
             {
-                sycl::queue gpuQ(sycl::default_selector_v, dpc_common::exception_handler);
+                sycl::queue gpuQ(sycl::default_selector_v,
+                    sycl::property::queue::enable_profiling());
 
                 sycl::range<1> n_items{batch.size()}; 
                 sycl::buffer batch_buffer(batch);
-                gpuQ.submit([&](sycl::handler& h) {
+                sycl::event event = gpuQ.submit([&](sycl::handler& h) {
                     sycl::accessor batch_accessor(batch_buffer, h, sycl::read_write);
                     auto compute = [=](sycl::id<1> index) {
                         auto& packet = batch_accessor[index];
@@ -168,7 +184,15 @@ int main(int argc, char* argv[]) {
                     };
                    
                     h.parallel_for(n_items, compute);
-                }).wait_and_throw();
+                });
+                
+                event.wait();
+                double kernel_time = (event.template get_profiling_info<
+                    sycl::info::event_profiling::command_end>() -
+                event.template get_profiling_info<
+                    sycl::info::event_profiling::command_start>()) / 1e6;
+                avg_routing_time += kernel_time;
+                routing_count++;
             }
             return batch;
         }
@@ -235,5 +259,10 @@ int main(int argc, char* argv[]) {
         }
     }
     
+    std::cout << "------------------------------------------\n";
+    std::cout << "Time profiling:\n\n";
+    std::cout << "Average inspection time: " << avg_inspect_time / inspect_count << " ms\n";
+    std::cout << "Average routing time: " << avg_routing_time / routing_count << " ms\n";
+
     return 0;
 }
